@@ -38,6 +38,22 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
+app.use((req, res, next) => {
+  if (
+    req.body !== undefined &&
+    (!req.body ||
+      typeof req.body !== "object" ||
+      Array.isArray(req.body))
+  ) {
+    return res.status(400).send({
+      success: false,
+      message: "Invalid request body",
+    });
+  }
+
+  next();
+});
+
 // ==========================================
 // MONGODB CONNECTION
 // ==========================================
