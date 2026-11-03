@@ -284,9 +284,12 @@ app.get("/api/events", async (req, res) => {
     console.error("Get Events Error:", error);
 
     res.status(500).send({
-      success: false,
-      message: "Failed to fetch events",
-    });
+  success: false,
+  message: "Unable to retrieve events at this time.",
+  error: process.env.NODE_ENV === "development"
+    ? error.message
+    : undefined,
+});
   }
 });
 
