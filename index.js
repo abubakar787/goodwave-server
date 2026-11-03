@@ -11,6 +11,20 @@ const app = express();
 const PORT = process.env.PORT || 8000;
 
 app.use(cors());
+app.use((req, res, next) => {
+  if (
+    req.body &&
+    typeof req.body !== "object" ||
+    Array.isArray(req.body)
+  ) {
+    return res.status(400).send({
+      success: false,
+      message: "Invalid request body",
+    });
+  }
+
+  next();
+});
 app.use(express.json());
 
 // ==========================================
