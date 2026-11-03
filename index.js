@@ -17,7 +17,7 @@ app.use(express.json());
 // MONGODB CONNECTION
 // ==========================================
 
-const client = new MongoClient(process.env.MONGODB_URI);
+const client = new MongoClient(process.env.MONGODB_URI || "");
 
 const database = client.db("goodwaveDB");
 
@@ -28,7 +28,8 @@ const joinedCollection = database.collection("joinedEvents");
 // BETTER AUTH JWT CONFIGURATION
 // ==========================================
 
-const AUTH_URL = process.env.BETTER_AUTH_URL || "http://localhost:3000";
+const AUTH_URL =
+  process.env.BETTER_AUTH_URL || "http://localhost:3000";
 
 const JWKS = createRemoteJWKSet(
   new URL(`${AUTH_URL}/api/auth/jwks`)
@@ -145,13 +146,16 @@ function validateEventData(data, partial = false) {
     }
   }
 
-  if (data.title !== undefined && data.title.trim().length < 3) {
+  if (
+    data.title !== undefined &&
+    String(data.title).trim().length < 3
+  ) {
     return "Title must contain at least 3 characters";
   }
 
   if (
     data.description !== undefined &&
-    data.description.trim().length < 10
+    String(data.description).trim().length < 10
   ) {
     return "Description must contain at least 10 characters";
   }
@@ -223,10 +227,9 @@ app.get("/api/events", async (req, res) => {
     }
 
     if (typeof search === "string" && search.trim()) {
-      const safeSearch = search.trim().replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&"
-      );
+      const safeSearch = search
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
       const searchRegex = new RegExp(safeSearch, "i");
 
@@ -375,7 +378,6 @@ app.post("/api/events", verifyToken, async (req, res) => {
 
 // ==========================================
 // GET MY CREATED EVENTS
-// MANAGE EVENTS PAGE
 // PROTECTED API
 // ==========================================
 
@@ -588,18 +590,6 @@ app.post("/api/events/:id/join", verifyToken, async (req, res) => {
       });
     }
 
-    const existingJoin = await joinedCollection.findOne({
-      eventId: new ObjectId(id),
-      userId: user.userId,
-    });
-
-    if (existingJoin) {
-      return res.status(409).send({
-        success: false,
-        message: "You have already joined this event",
-      });
-    }
-
     const joinData = {
       eventId: new ObjectId(id),
       userId: user.userId,
@@ -616,6 +606,14 @@ app.post("/api/events/:id/join", verifyToken, async (req, res) => {
       data: joinData,
     });
   } catch (error) {
+    // MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).send({
+        success: false,
+        message: "You have already joined this event",
+      });
+    }
+
     console.error("Join Event Error:", error);
 
     res.status(500).send({
@@ -743,7 +741,7 @@ async function startServer() {
     );
 
     app.listen(PORT, () => {
-      console.log(`Server is running on http://localhost:${PORT}`);
+      console.log(`Server is running on port ${PORT}`);
     });
   } catch (error) {
     console.error("Server startup failed:", error);
