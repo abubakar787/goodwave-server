@@ -64,6 +64,28 @@ const database = client.db("goodwaveDB");
 
 const eventCollection = database.collection("events");
 const joinedCollection = database.collection("joinedEvents");
+let dbConnectionPromise;
+
+async function connectDatabase() {
+  if (!dbConnectionPromise) {
+    dbConnectionPromise = client
+      .connect()
+      .then(async () => {
+        await joinedCollection.createIndex(
+          { eventId: 1, userId: 1 },
+          { unique: true }
+        );
+
+        console.log("MongoDB connected successfully!");
+      })
+      .catch((error) => {
+        dbConnectionPromise = null;
+        throw error;
+      });
+  }
+
+  return dbConnectionPromise;
+}
 
 // ==========================================
 // BETTER AUTH JWT CONFIGURATION
@@ -790,32 +812,21 @@ app.get("/api/health", async (req, res) => {
     });
   }
 });
-// START SERVER
-// ==========================================
+// LOCAL DEVELOPMENT SERVER
 
-async function startServer() {
-  try {
-    if (!process.env.MONGODB_URI) {
-      throw new Error("MONGODB_URI is missing");
-    }
-
-    await client.connect();
-
-    console.log("You successfully connected to MongoDB!");
-
-    // Prevent duplicate joins, including simultaneous requests
-    await joinedCollection.createIndex(
-      { eventId: 1, userId: 1 },
-      { unique: true }
-    );
-
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+if (process.env.VERCEL !== "1") {
+  connectDatabase()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error("Server startup failed:", error);
+      process.exit(1);
     });
-  } catch (error) {
-    console.error("Server startup failed:", error);
-    process.exit(1);
-  }
 }
 
-startServer();
+// VERCEL SERVERLESS EXPORT
+
+export default app;
