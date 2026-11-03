@@ -10,7 +10,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-app.use(cors());
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:3000"
+)
+  .split(",")
+  .map((origin) => origin.trim());
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 app.use((req, res, next) => {
   if (
     req.body &&
