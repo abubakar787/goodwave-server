@@ -721,6 +721,31 @@ app.get("/api/events/:id/join-status", verifyToken, async (req, res) => {
 });
 
 // ==========================================
+// ==========================================
+// HEALTH CHECK API
+// ==========================================
+
+app.get("/api/health", async (req, res) => {
+  try {
+    await database.command({ ping: 1 });
+
+    res.status(200).send({
+      success: true,
+      message: "GOODWAVE API is healthy",
+      database: "connected",
+      uptime: process.uptime(),
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    console.error("Health Check Error:", error);
+
+    res.status(503).send({
+      success: false,
+      message: "Service unavailable",
+      database: "disconnected",
+    });
+  }
+});
 // START SERVER
 // ==========================================
 
