@@ -3,53 +3,203 @@ import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
 import dotenv from "dotenv";
 import cors from "cors";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
-// Load environment variables
 dotenv.config();
 
-// Initialize Express
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection
+// ==========================================
+// MONGODB CONNECTION
+// ==========================================
+
 const client = new MongoClient(process.env.MONGODB_URI);
 
 const database = client.db("goodwaveDB");
+
 const eventCollection = database.collection("events");
+const joinedCollection = database.collection("joinedEvents");
 
-// Connect to MongoDB
-export async function connectToMongoDB() {
-  try {
-    await client.connect();
+// ==========================================
+// BETTER AUTH JWT CONFIGURATION
+// ==========================================
 
-    console.log("You successfully connected to MongoDB!");
+const AUTH_URL = process.env.BETTER_AUTH_URL || "http://localhost:3000";
 
-    return client;
-  } catch (error) {
-    console.error("MongoDB connection failed:", error);
-    throw error;
+const JWKS = createRemoteJWKSet(
+  new URL(`${AUTH_URL}/api/auth/jwks`)
+);
+
+// ==========================================
+// GET VERIFIED USER IDENTITY
+// ==========================================
+
+function getUserIdentity(req) {
+  const userId = req.user?.sub;
+  const email = req.user?.email;
+
+  if (!userId || !email) {
+    throw new Error("User ID or email missing from JWT");
   }
+
+  return {
+    userId: String(userId),
+    email: String(email).toLowerCase(),
+  };
 }
 
-// Home Route
+// ==========================================
+// JWT AUTHENTICATION MIDDLEWARE
+// ==========================================
+
+const verifyToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).send({
+        success: false,
+        message: "Authentication required. Please login.",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: AUTH_URL,
+      audience: AUTH_URL,
+    });
+
+    req.user = payload;
+
+    next();
+  } catch (error) {
+    console.error("JWT Verification Error:", error.message);
+
+    return res.status(401).send({
+      success: false,
+      message: "Invalid or expired authentication token.",
+    });
+  }
+};
+
+// ==========================================
+// CHECK EVENT OWNERSHIP
+// ==========================================
+
+async function findOwnedEvent(eventId, user) {
+  if (!ObjectId.isValid(eventId)) {
+    return null;
+  }
+
+  return eventCollection.findOne({
+    _id: new ObjectId(eventId),
+    organizerId: user.userId,
+  });
+}
+
+// ==========================================
+// VALIDATE EVENT DATA
+// ==========================================
+
+function validateEventData(data, partial = false) {
+  const fields = [
+    "title",
+    "description",
+    "eventType",
+    "thumbnail",
+    "location",
+    "eventDate",
+  ];
+
+  for (const field of fields) {
+    if (!partial || data[field] !== undefined) {
+      if (
+        data[field] === undefined ||
+        data[field] === null ||
+        String(data[field]).trim() === ""
+      ) {
+        return `${field} is required`;
+      }
+    }
+  }
+
+  const limits = {
+    title: 100,
+    description: 2000,
+    eventType: 50,
+    thumbnail: 2048,
+    location: 150,
+  };
+
+  for (const [field, maxLength] of Object.entries(limits)) {
+    if (
+      data[field] !== undefined &&
+      String(data[field]).trim().length > maxLength
+    ) {
+      return `${field} exceeds maximum length`;
+    }
+  }
+
+  if (data.title !== undefined && data.title.trim().length < 3) {
+    return "Title must contain at least 3 characters";
+  }
+
+  if (
+    data.description !== undefined &&
+    data.description.trim().length < 10
+  ) {
+    return "Description must contain at least 10 characters";
+  }
+
+  if (data.thumbnail !== undefined) {
+    try {
+      const imageUrl = new URL(data.thumbnail);
+
+      if (!["http:", "https:"].includes(imageUrl.protocol)) {
+        return "Invalid thumbnail URL";
+      }
+    } catch {
+      return "Invalid thumbnail URL";
+    }
+  }
+
+  if (data.eventDate !== undefined) {
+    const selectedDate = new Date(data.eventDate);
+
+    if (Number.isNaN(selectedDate.getTime())) {
+      return "Invalid event date";
+    }
+
+    if (selectedDate <= new Date()) {
+      return "Event date must be in the future";
+    }
+  }
+
+  return null;
+}
+
+// ==========================================
+// HOME ROUTE
+// ==========================================
+
 app.get("/", (req, res) => {
-  res.send("Goodwave server is running!");
+  res.send("GOODWAVE server is running!");
 });
 
 // ==========================================
 // GET ALL UPCOMING EVENTS
-// Category Filter + Search + Limit
+// PUBLIC API
 // ==========================================
 
 app.get("/api/events", async (req, res) => {
   try {
     const { category, search } = req.query;
 
-    // Validate limit
     const requestedLimit = Number.parseInt(req.query.limit, 10);
 
     const limit =
@@ -57,7 +207,6 @@ app.get("/api/events", async (req, res) => {
         ? Math.min(requestedLimit, 100)
         : 0;
 
-    // Only future events
     const filter = {
       eventDate: { $exists: true },
       $expr: {
@@ -65,7 +214,6 @@ app.get("/api/events", async (req, res) => {
       },
     };
 
-    // Category Filter
     if (
       typeof category === "string" &&
       category.trim() &&
@@ -74,7 +222,6 @@ app.get("/api/events", async (req, res) => {
       filter.eventType = category.trim();
     }
 
-    // Search by title, location or description
     if (typeof search === "string" && search.trim()) {
       const safeSearch = search.trim().replace(
         /[.*+?^${}()|[\]\\]/g,
@@ -90,7 +237,6 @@ app.get("/api/events", async (req, res) => {
       ];
     }
 
-    // Fetch events from MongoDB
     const cursor = eventCollection
       .find(filter)
       .sort({ eventDate: 1 });
@@ -118,13 +264,13 @@ app.get("/api/events", async (req, res) => {
 
 // ==========================================
 // GET SINGLE EVENT DETAILS
+// PUBLIC API
 // ==========================================
 
 app.get("/api/events/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Validate MongoDB ObjectId
     if (!ObjectId.isValid(id)) {
       return res.status(400).send({
         success: false,
@@ -159,11 +305,13 @@ app.get("/api/events/:id", async (req, res) => {
 
 // ==========================================
 // CREATE EVENT
-// JWT SECURITY WILL BE ADDED NEXT
+// PROTECTED API
 // ==========================================
 
-app.post("/api/events", async (req, res) => {
+app.post("/api/events", verifyToken, async (req, res) => {
   try {
+    const user = getUserIdentity(req);
+
     const {
       title,
       description,
@@ -173,62 +321,47 @@ app.post("/api/events", async (req, res) => {
       eventDate,
     } = req.body;
 
-    // Required field validation
-    if (
-      !title?.trim() ||
-      !description?.trim() ||
-      !eventType?.trim() ||
-      !thumbnail?.trim() ||
-      !location?.trim() ||
-      !eventDate
-    ) {
+    const validationError = validateEventData({
+      title,
+      description,
+      eventType,
+      thumbnail,
+      location,
+      eventDate,
+    });
+
+    if (validationError) {
       return res.status(400).send({
         success: false,
-        message: "All fields are required",
+        message: validationError,
       });
     }
 
-    // Validate event date
-    const selectedDate = new Date(eventDate);
-
-    if (Number.isNaN(selectedDate.getTime())) {
-      return res.status(400).send({
-        success: false,
-        message: "Invalid event date",
-      });
-    }
-
-    if (selectedDate <= new Date()) {
-      return res.status(400).send({
-        success: false,
-        message: "Event date must be in the future",
-      });
-    }
-
-    // Prepare event data
     const eventData = {
       title: title.trim(),
       description: description.trim(),
       eventType: eventType.trim(),
       thumbnail: thumbnail.trim(),
       location: location.trim(),
-      eventDate: selectedDate,
+      eventDate: new Date(eventDate),
 
-      // Temporary sample organizer.
-      // Next step: take this from verified JWT.
-      organizerEmail: "demo@goodwave.com",
+      organizerId: user.userId,
+      organizerEmail: user.email,
 
       createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
-    // Insert into MongoDB
     const result = await eventCollection.insertOne(eventData);
 
     res.status(201).send({
       success: true,
       message: "Event created successfully",
       insertedId: result.insertedId,
-      data: eventData,
+      data: {
+        ...eventData,
+        _id: result.insertedId,
+      },
     });
   } catch (error) {
     console.error("Create Event Error:", error);
@@ -241,12 +374,373 @@ app.post("/api/events", async (req, res) => {
 });
 
 // ==========================================
-// START SERVER AFTER MONGODB CONNECTION
+// GET MY CREATED EVENTS
+// MANAGE EVENTS PAGE
+// PROTECTED API
+// ==========================================
+
+app.get("/api/my-events", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+
+    const events = await eventCollection
+      .find({
+        organizerId: user.userId,
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).send({
+      success: true,
+      total: events.length,
+      data: events,
+    });
+  } catch (error) {
+    console.error("Get My Events Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch your events",
+    });
+  }
+});
+
+// ==========================================
+// UPDATE EVENT
+// ONLY EVENT OWNER
+// PROTECTED API
+// ==========================================
+
+app.patch("/api/events/:id", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const event = await findOwnedEvent(id, user);
+
+    if (!event) {
+      return res.status(404).send({
+        success: false,
+        message: "Event not found or you are not the owner",
+      });
+    }
+
+    const allowedFields = [
+      "title",
+      "description",
+      "eventType",
+      "thumbnail",
+      "location",
+      "eventDate",
+    ];
+
+    const updateData = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updateData[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).send({
+        success: false,
+        message: "No valid fields provided for update",
+      });
+    }
+
+    const validationError = validateEventData(updateData, true);
+
+    if (validationError) {
+      return res.status(400).send({
+        success: false,
+        message: validationError,
+      });
+    }
+
+    if (updateData.eventDate !== undefined) {
+      updateData.eventDate = new Date(updateData.eventDate);
+    }
+
+    for (const field of Object.keys(updateData)) {
+      if (typeof updateData[field] === "string") {
+        updateData[field] = updateData[field].trim();
+      }
+    }
+
+    updateData.updatedAt = new Date();
+
+    await eventCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        organizerId: user.userId,
+      },
+      {
+        $set: updateData,
+      }
+    );
+
+    const updatedEvent = await eventCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    res.status(200).send({
+      success: true,
+      message: "Event updated successfully",
+      data: updatedEvent,
+    });
+  } catch (error) {
+    console.error("Update Event Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to update event",
+    });
+  }
+});
+
+// ==========================================
+// DELETE EVENT
+// ONLY EVENT OWNER
+// PROTECTED API
+// ==========================================
+
+app.delete("/api/events/:id", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const event = await findOwnedEvent(id, user);
+
+    if (!event) {
+      return res.status(404).send({
+        success: false,
+        message: "Event not found or you are not the owner",
+      });
+    }
+
+    await eventCollection.deleteOne({
+      _id: new ObjectId(id),
+      organizerId: user.userId,
+    });
+
+    // Remove all joins related to this event
+    await joinedCollection.deleteMany({
+      eventId: new ObjectId(id),
+    });
+
+    res.status(200).send({
+      success: true,
+      message: "Event deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Event Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to delete event",
+    });
+  }
+});
+
+// ==========================================
+// JOIN EVENT
+// PROTECTED API
+// ==========================================
+
+app.post("/api/events/:id/join", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const event = await eventCollection.findOne({
+      _id: new ObjectId(id),
+      $expr: {
+        $gt: [{ $toDate: "$eventDate" }, new Date()],
+      },
+    });
+
+    if (!event) {
+      return res.status(404).send({
+        success: false,
+        message: "Upcoming event not found",
+      });
+    }
+
+    const existingJoin = await joinedCollection.findOne({
+      eventId: new ObjectId(id),
+      userId: user.userId,
+    });
+
+    if (existingJoin) {
+      return res.status(409).send({
+        success: false,
+        message: "You have already joined this event",
+      });
+    }
+
+    const joinData = {
+      eventId: new ObjectId(id),
+      userId: user.userId,
+      userEmail: user.email,
+      eventTitle: event.title,
+      joinedAt: new Date(),
+    };
+
+    await joinedCollection.insertOne(joinData);
+
+    res.status(201).send({
+      success: true,
+      message: "You joined the event successfully",
+      data: joinData,
+    });
+  } catch (error) {
+    console.error("Join Event Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to join event",
+    });
+  }
+});
+
+// ==========================================
+// GET JOINED EVENTS
+// PROTECTED API
+// ==========================================
+
+app.get("/api/joined-events", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+
+    const joinedRecords = await joinedCollection
+      .find({
+        userId: user.userId,
+      })
+      .sort({ joinedAt: -1 })
+      .toArray();
+
+    const eventIds = joinedRecords.map((record) => record.eventId);
+
+    const events = await eventCollection
+      .find({
+        _id: { $in: eventIds },
+      })
+      .toArray();
+
+    const eventMap = new Map(
+      events.map((event) => [event._id.toString(), event])
+    );
+
+    const joinedEvents = joinedRecords
+      .map((record) => {
+        const event = eventMap.get(record.eventId.toString());
+
+        if (!event) return null;
+
+        return {
+          ...event,
+          joinedAt: record.joinedAt,
+        };
+      })
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          new Date(a.eventDate).getTime() -
+          new Date(b.eventDate).getTime()
+      );
+
+    res.status(200).send({
+      success: true,
+      total: joinedEvents.length,
+      data: joinedEvents,
+    });
+  } catch (error) {
+    console.error("Get Joined Events Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to fetch joined events",
+    });
+  }
+});
+
+// ==========================================
+// CHECK IF USER JOINED AN EVENT
+// PROTECTED API
+// ==========================================
+
+app.get("/api/events/:id/join-status", verifyToken, async (req, res) => {
+  try {
+    const user = getUserIdentity(req);
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        success: false,
+        message: "Invalid event ID",
+      });
+    }
+
+    const joined = await joinedCollection.findOne({
+      eventId: new ObjectId(id),
+      userId: user.userId,
+    });
+
+    res.status(200).send({
+      success: true,
+      joined: Boolean(joined),
+    });
+  } catch (error) {
+    console.error("Join Status Error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to check join status",
+    });
+  }
+});
+
+// ==========================================
+// START SERVER
 // ==========================================
 
 async function startServer() {
   try {
-    await connectToMongoDB();
+    if (!process.env.MONGODB_URI) {
+      throw new Error("MONGODB_URI is missing");
+    }
+
+    await client.connect();
+
+    console.log("You successfully connected to MongoDB!");
+
+    // Prevent duplicate joins, including simultaneous requests
+    await joinedCollection.createIndex(
+      { eventId: 1, userId: 1 },
+      { unique: true }
+    );
 
     app.listen(PORT, () => {
       console.log(`Server is running on http://localhost:${PORT}`);
